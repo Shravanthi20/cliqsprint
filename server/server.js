@@ -20,11 +20,12 @@ let mondayAccessToken = process.env.MONDAY_ACCESS_TOKEN || '';
  * Helper: build public URL for webhook/redirect.
  * If NGROK_URL is set in .env it uses that; otherwise builds from request Host.
  */
+// replace existing getPublicUrl function with this
 function getPublicUrl(req) {
-  if (process.env.NGROK_URL && process.env.NGROK_URL.startsWith('http')) {
-    return process.env.NGROK_URL.replace(/\/$/, '');
-  }
-  // fallback to request host (may be http://localhost:3000)
+  // If you set MONDAY_PUBLIC_URL (or PUBLIC_URL) in Render env, use that (preferred)
+  const publicEnv = process.env.MONDAY_PUBLIC_URL || process.env.PUBLIC_URL || process.env.NGROK_URL;
+  if (publicEnv && publicEnv.startsWith('http')) return publicEnv.replace(/\/$/, '');
+  // Fallback to request host (works when Render forwards host correctly)
   const proto = req.headers['x-forwarded-proto'] || req.protocol;
   return `${proto}://${req.get('host')}`;
 }

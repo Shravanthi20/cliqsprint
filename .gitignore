@@ -1,0 +1,75 @@
+#############################
+# Node.js (server folder)
+#############################
+
+# Node modules
+server/node_modules/
+node_modules/
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Env files
+server/.env
+.env
+.env.local
+.env.*.local
+
+# Build output
+dist/
+build/
+.cache/
+.tmp/
+
+#############################
+# Python (ai-server/venv)
+#############################
+
+# Virtual environment
+server/ai-server/venv/
+venv/
+ENV/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+#############################
+# OS / Editor Files
+#############################
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+#############################
+# Misc
+#############################
+
+# Temp files
+*.tmp
+*.temp
+
+# Coverage
+coverage/
+.coverage
+
+# Local server runtime
+server/.cache/
+server/.tmp/

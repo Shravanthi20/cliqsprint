@@ -1,22 +1,46 @@
 // server/db.js
 const { MongoClient } = require('mongodb');
 
-let client;
-let db;
+let client = null;
+let db = null;
 
+/**
+ * Connects to MongoDB and initializes indexes.
+ * - Uses MONGODB_URI from env.
+ * - Optionally uses MONGODB_DBNAME (else DB from URI or "test").
+ */
 async function connectDB() {
   if (db) return db;
+
   const uri = process.env.MONGODB_URI;
   if (!uri) {
     console.warn('MONGODB_URI not set — running without DB persistence.');
     return null;
   }
-  client = new MongoClient(uri, { useNewUrlParser: true, useUnifiedTopology: true });
-  await client.connect();
-  // if you want a specific DB name inside the URI, client.db() will pick it up
-  db = client.db();
-  console.log('MongoDB connected');
-  return db;
+
+  try {
+    // NOTE: do NOT pass legacy options like useNewUrlParser/useUnifiedTopology
+    client = new MongoClient(uri);
+    await client.connect();
+
+    // allow explicit DB name via env, otherwise use name from URI (or default)
+    const dbName = process.env.MONGODB_DBNAME || client.db().databaseName || 'test';
+    db = client.db(dbName);
+
+    // Ensure useful indexes: unique on service, optional TTL on expires_at
+    await db.collection('tokens').createIndex({ service: 1 }, { unique: true });
+    // If you want tokens to auto-expire based on expires_at, uncomment:
+    // await db.collection('tokens').createIndex({ expires_at: 1 }, { expireAfterSeconds: 0 });
+
+    console.log('MongoDB connected to DB:', db.databaseName);
+    return db;
+  } catch (err) {
+    console.error('MongoDB connect error:', err);
+    try { await client?.close(); } catch (e) { /* ignore */ }
+    client = null;
+    db = null;
+    throw err;
+  }
 }
 
 function getDB() {
@@ -25,7 +49,7 @@ function getDB() {
 }
 
 async function saveToken(service, access_token, refresh_token = null, expires_in = null) {
-  if (!db) return null; // no DB configured
+  if (!db) return null;
   const doc = {
     service,
     access_token,
@@ -47,4 +71,14 @@ async function getToken(service) {
   return doc?.access_token || null;
 }
 
-module.exports = { connectDB, getDB, saveToken, getToken, closeDB: () => client?.close() };
+async function closeDB() {
+  if (!client) return;
+  try {
+    await client.close();
+  } finally {
+    client = null;
+    db = null;
+  }
+}
+
+module.exports = { connectDB, getDB, saveToken, getToken, closeDB };

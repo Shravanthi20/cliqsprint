@@ -172,6 +172,18 @@ app.post('/webhook/monday', (req, res) => {
   res.status(200).send("ok");
 });
 
+app.get('/webhook/test', async (req, res) => {
+  try {
+    await axios.post(process.env.CLIQ_BOT_INCOMING, {
+      text: "🚀 Test message from Render backend → Zoho Cliq is working!"
+    });
+    res.send("Test sent to Cliq!");
+  } catch (e) {
+    res.send("Failed to send: " + e.message);
+  }
+});
+
+
 /**********************************************
  * Cliq Action Endpoint
  **********************************************/

@@ -14,16 +14,14 @@ const CLIENT_ID = process.env.MONDAY_CLIENT_ID || '';
 const CLIENT_SECRET = process.env.MONDAY_CLIENT_SECRET || '';
 const REDIRECT_URL = process.env.MONDAY_REDIRECT_URL || `http://localhost:${PORT}/monday/oauth/callback`;
 
-// runtime storage (demo only)
-let mondayAccessToken = process.env.MONDAY_ACCESS_TOKEN || '';
+let mondayAccessToken = '';   // always fill this from DB or OAuth
 
 /**
- * Helper: build public URL for webhook/redirect.
- * If MONDAY_PUBLIC_URL / PUBLIC_URL / NGROK_URL is set in .env it uses that; otherwise builds from request Host.
+ * Build your public URL; works in Render.
  */
 function getPublicUrl(req) {
-  const publicEnv = process.env.MONDAY_PUBLIC_URL || process.env.PUBLIC_URL || process.env.NGROK_URL;
-  if (publicEnv && publicEnv.startsWith('http')) return publicEnv.replace(/\/$/, '');
+  const envUrl = process.env.MONDAY_PUBLIC_URL || process.env.PUBLIC_URL || process.env.NGROK_URL;
+  if (envUrl && envUrl.startsWith('http')) return envUrl.replace(/\/$/, '');
   const proto = req.headers['x-forwarded-proto'] || req.protocol;
   return `${proto}://${req.get('host')}`;
 }
@@ -32,146 +30,176 @@ app.get('/', (req, res) => {
   res.send('monday-cliq-app backend is running');
 });
 
-//
-// Step A: Start OAuth flow - redirects user to monday's consent page
-//
+/*******************************
+ * OAuth Step A - redirect user
+ *******************************/
 app.get('/monday/oauth', (req, res) => {
-  if (!CLIENT_ID) {
-    return res.send('MONDAY_CLIENT_ID is not configured in .env. Add it and restart the server.');
-  }
+  if (!CLIENT_ID) return res.send('MONDAY_CLIENT_ID missing in .env or Render env.');
   const redirect = encodeURIComponent(REDIRECT_URL);
   const authUrl = `https://auth.monday.com/oauth2/authorize?client_id=${CLIENT_ID}&redirect_uri=${redirect}`;
+  console.log("Redirecting to:", authUrl);
   res.redirect(authUrl);
 });
 
-//
-// Step B: OAuth callback - exchange code for access token
-//
+/***********************************************
+ * OAuth Step B - callback receives ?code=
+ ***********************************************/
 app.get('/monday/oauth/callback', async (req, res) => {
   const code = req.query.code;
-  console.log('/monday/oauth/callback called, code=', code);
-  if (!code) {
-    return res.status(400).send('No code query parameter present.');
-  }
+  console.log("OAuth callback called. Code =", code);
+
+  if (!code) return res.status(400).send("No 'code' received.");
 
   try {
-    const resp = await axios.post('https://auth.monday.com/oauth2/token', {
-      code,
-      client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
-      redirect_uri: REDIRECT_URL,
-      grant_type: 'authorization_code'
-    });
+    const resp = await axios.post(
+      'https://auth.monday.com/oauth2/token',
+      {
+        code,
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
+        redirect_uri: REDIRECT_URL,
+        grant_type: 'authorization_code'
+      }
+    );
 
-    if (!resp.data || !resp.data.access_token) {
-      console.error('No access_token in response:', resp.data);
-      return res.status(500).send('Token exchange did not return access_token. Check server logs.');
+    const access = resp.data?.access_token;
+    if (!access) {
+      console.error("Missing access_token:", resp.data);
+      return res.status(500).send("Token exchange failed.");
     }
 
-    mondayAccessToken = resp.data.access_token;
+    console.log("OAuth token obtained.");
 
-    // set runtime token in monday lib so future queries use it
-    try { mondayLib.setToken(mondayAccessToken); } catch (e) { console.warn('mondayLib.setToken failed:', e.message); }
+    mondayAccessToken = access;
+    mondayLib.setToken(access);
+    process.env.MONDAY_ACCESS_TOKEN = access;
 
-    // For demo only: store in process.env so same process can use it
-    process.env.MONDAY_ACCESS_TOKEN = mondayAccessToken;
-
-    // Persist the token to DB (if configured). Save access_token + refresh + expiry if present.
+    // Save to DB
     try {
-      await saveToken('monday', resp.data.access_token, resp.data.refresh_token || null, resp.data.expires_in || null);
-      console.log('Saved monday token to DB (if DB configured).');
-    } catch (dbErr) {
-      console.warn('Failed to save token to DB:', dbErr.message);
+      await saveToken('monday', access, resp.data.refresh_token || null, resp.data.expires_in || null);
+      console.log("Saved monday token to DB.");
+    } catch (e) {
+      console.error("Failed saving token to DB:", e.message);
     }
 
-    console.log('OAuth success. Access token obtained and set in memory.');
-    res.send('OAuth complete. Server has the monday access token. You can now call /monday/create-webhook?board=<BOARD_ID>');
+    res.send("OAuth complete. You can now call /monday/create-webhook?board=<BOARD_ID>");
   } catch (err) {
-    console.error('Error exchanging OAuth code for token:', err.response?.data || err.message);
-    res.status(500).send('OAuth token exchange failed. See server logs.');
+    console.error("OAuth token exchange error:", err.response?.data || err.message);
+    res.status(500).send("OAuth exchange failed.");
   }
 });
 
-//
-// Step C: Create a board webhook using the OAuth token
-// Example: GET /monday/create-webhook?board=123456789
-//
+/***********************************************
+ * CREATE WEBHOOK (Step C)
+ ***********************************************/
 app.get('/monday/create-webhook', async (req, res) => {
-  const boardId = req.query.board;
-  if (!boardId) return res.status(400).send('Missing ?board=<BOARD_ID> query param.');
+  const boardId = parseInt(req.query.board, 10);
+  if (!boardId) return res.status(400).send("Missing or invalid board ID.");
 
-  // ensure we have a token (check in-memory -> env -> DB)
+  // Ensure token present (memory -> env -> DB)
   let token = mondayAccessToken || process.env.MONDAY_ACCESS_TOKEN;
   if (!token) {
     try {
       token = await getToken('monday');
       if (token) {
         mondayAccessToken = token;
-        try { mondayLib.setToken(token); } catch (e) { /* ignore */ }
+        mondayLib.setToken(token);
+        process.env.MONDAY_ACCESS_TOKEN = token;
       }
     } catch (e) {
-      console.warn('Could not read token from DB:', e.message);
+      console.error("Failed to read token from DB:", e.message);
     }
   }
-  if (!token) return res.status(400).send('No monday OAuth token available. Please run /monday/oauth first.');
 
-  // compute public webhook URL (use MONDAY_PUBLIC_URL/NGROK_URL if provided)
+  if (!token) {
+    return res.status(400).send("No monday token available. Run /monday/oauth first.");
+  }
+
   const publicUrl = getPublicUrl(req);
-  const webhookUrl = `${publicUrl.replace(/\/$/, '')}/webhook/monday`;
+  const webhookUrl = `${publicUrl}/webhook/monday`;
 
-  const mutation = `
-    mutation {
-      create_webhook (
-        board_id: ${boardId},
-        url: "${webhookUrl}",
-        event: change_column_value
-      ) {
+  console.log("Creating webhook for board:", boardId, "URL:", webhookUrl);
+
+  // Safer GraphQL query using variables
+  const query = `
+    mutation CreateWebhook($boardId: Int!, $url: String!) {
+      create_webhook(board_id: $boardId, url: $url, event: change_column_value) {
         id
       }
     }
   `;
 
   try {
-    const graphqlResp = await axios.post(
-      'https://api.monday.com/v2',
-      { query: mutation },
-      { headers: { Authorization: token, 'Content-Type': 'application/json' } }
+    const resp = await axios.post(
+      "https://api.monday.com/v2",
+      {
+        query,
+        variables: {
+          boardId,
+          url: webhookUrl
+        }
+      },
+      {
+        headers: {
+          Authorization: token,
+          "Content-Type": "application/json"
+        }
+      }
     );
 
-    console.log('create_webhook response:', JSON.stringify(graphqlResp.data, null, 2));
-    return res.json(graphqlResp.data);
+    console.log("create_webhook response:", JSON.stringify(resp.data, null, 2));
+    return res.json(resp.data);
   } catch (err) {
-    console.error('Error creating webhook:', err.response?.data || err.message);
-    return res.status(500).send('Failed to create webhook. See server logs.');
+    console.error("Webhook creation FAILED:", {
+      status: err.response?.status,
+      data: err.response?.data,
+    });
+    return res.status(500).send("Webhook creation failed. Check Render logs.");
   }
 });
 
-//
-// Webhook receiver endpoint (monday will POST here)
-//
+/***********************************************
+ * Monday webhook receiver
+ ***********************************************/
 app.post('/webhook/monday', (req, res) => {
-  console.log('Received monday webhook payload:\n', JSON.stringify(req.body, null, 2));
-  // quick 200 to monday
-  res.status(200).send('ok');
+  console.log("Received Monday webhook:", JSON.stringify(req.body, null, 2));
+  res.status(200).send("ok");
 });
 
-//
-// Simple Cliq action endpoint (Cliq will POST here on button click)
-//
+/***********************************************
+ * Simple Cliq action endpoint
+ ***********************************************/
 app.post('/cliq/action', (req, res) => {
-  console.log('Received Cliq action payload:\n', JSON.stringify(req.body, null, 2));
-  // Respond with a simple acknowledgement - Cliq expects JSON
-  res.json({ text: 'Action received by backend (logged).' });
+  console.log("Received Cliq action:", JSON.stringify(req.body, null, 2));
+  res.json({ text: "Action received!" });
 });
 
-// start server after attempting DB connect
+/***********************************************
+ * START SERVER (with token loading!)
+ ***********************************************/
 async function start() {
   try {
-    await connectDB(); // will warn if MONGODB_URI not set
-    app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}  (PORT=${PORT})`));
+    const db = await connectDB();
+    console.log("MongoDB connected.");
+
+    // Load token from DB on startup
+    const saved = await getToken('monday');
+    if (saved) {
+      console.log("Loaded saved monday token:", saved.substring(0, 10) + "...");
+      mondayAccessToken = saved;
+      mondayLib.setToken(saved);
+      process.env.MONDAY_ACCESS_TOKEN = saved;
+    } else {
+      console.log("No saved monday token found at startup.");
+    }
+
+    app.listen(PORT, () =>
+      console.log(`Server live at http://localhost:${PORT} (PORT=${PORT})`)
+    );
   } catch (err) {
-    console.error('Startup error:', err);
+    console.error("Startup error:", err);
     process.exit(1);
   }
 }
+
 start();

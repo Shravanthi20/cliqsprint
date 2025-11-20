@@ -93,8 +93,11 @@ app.get('/monday/oauth/callback', async (req, res) => {
  * CREATE WEBHOOK (Step C)
  ***********************************************/
 app.get('/monday/create-webhook', async (req, res) => {
-  const boardId = parseInt(req.query.board, 10);
-  if (!boardId) return res.status(400).send("Missing or invalid board ID.");
+  const boardIdRaw = req.query.board;
+  if (!boardIdRaw) return res.status(400).send("Missing ?board=<BOARD_ID> query param.");
+
+  // keep boardId as a string because monday expects ID!
+  const boardId = String(boardIdRaw);
 
   // Ensure token present (memory -> env -> DB)
   let token = mondayAccessToken || process.env.MONDAY_ACCESS_TOKEN;
@@ -107,22 +110,20 @@ app.get('/monday/create-webhook', async (req, res) => {
         process.env.MONDAY_ACCESS_TOKEN = token;
       }
     } catch (e) {
-      console.error("Failed to read token from DB:", e.message);
+      console.warn('Could not read token from DB:', e.message);
     }
   }
+  if (!token) return res.status(400).send('No monday OAuth token available. Please run /monday/oauth first.');
 
-  if (!token) {
-    return res.status(400).send("No monday token available. Run /monday/oauth first.");
-  }
-
+  // compute public webhook URL
   const publicUrl = getPublicUrl(req);
-  const webhookUrl = `${publicUrl}/webhook/monday`;
+  const webhookUrl = `${publicUrl.replace(/\/$/, '')}/webhook/monday`;
 
-  console.log("Creating webhook for board:", boardId, "URL:", webhookUrl);
+  console.log('Creating webhook for board:', boardId, 'URL:', webhookUrl);
 
-  // Safer GraphQL query using variables
-  const query = `
-    mutation CreateWebhook($boardId: Int!, $url: String!) {
+  // Use ID! for boardId and pass it as a string
+  const mutation = `
+    mutation CreateWebhook($boardId: ID!, $url: String!) {
       create_webhook(board_id: $boardId, url: $url, event: change_column_value) {
         id
       }
@@ -130,33 +131,27 @@ app.get('/monday/create-webhook', async (req, res) => {
   `;
 
   try {
-    const resp = await axios.post(
-      "https://api.monday.com/v2",
+    const graphqlResp = await axios.post(
+      'https://api.monday.com/v2',
       {
-        query,
-        variables: {
-          boardId,
-          url: webhookUrl
-        }
+        query: mutation,
+        variables: { boardId: boardId, url: webhookUrl } // boardId is a string here
       },
-      {
-        headers: {
-          Authorization: token,
-          "Content-Type": "application/json"
-        }
-      }
+      { headers: { Authorization: token, 'Content-Type': 'application/json' } }
     );
 
-    console.log("create_webhook response:", JSON.stringify(resp.data, null, 2));
-    return res.json(resp.data);
+    console.log('create_webhook response:', JSON.stringify(graphqlResp.data, null, 2));
+    return res.json(graphqlResp.data);
   } catch (err) {
-    console.error("Webhook creation FAILED:", {
+    console.error('Error creating webhook - full response:', {
       status: err.response?.status,
       data: err.response?.data,
+      headers: err.response?.headers
     });
-    return res.status(500).send("Webhook creation failed. Check Render logs.");
+    return res.status(500).send('Failed to create webhook. See server logs.');
   }
 });
+
 
 /***********************************************
  * Monday webhook receiver
